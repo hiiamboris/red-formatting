@@ -1,0 +1,1410 @@
+= Formatting Functions - draft
+:imagesdir: /images
+:toc:
+:numbered:
+
+////
+https://powerman.name/doc/asciidoc
+_**XXX is far from being implemented, mention it here?**_
+////
+
+= Introduction
+
+The purpose of this document is to: 
+
+* Provide an overview of goals, design ideas, and considerations
+* Show examples of function use, dialects, and output
+* Raise questions about what features to support
+
+
+= Overview
+
+While chatting with Nenad about a formatting system, the basic goals he
+outlined were:
+
+	printf() from C + format$() from VB, on steroids for Red 
+	(working on as many datatypes as possible).
+	
+	We also want possible column-oriented formatting, to make 
+	it easy to ouput tabular data. So a pad or align command 
+	would be required. Could this be done with a second dialect
+	that takes a list of column specs and generates format
+	strings?
+
+I have an old R2 `format` function that was inspired by VB's `format$`
+function patterns, which grew out of BASIC's `print using`, and is also
+used in many spreadsheets for cell formatting. I first thought I would
+just port that code to Red, but it had a lot of assumptions built in,
+had no concept of international formatting, and was designed for my 
+needs, not those of a wider community.
+
+Printf support, as a goal, also seemed easy enough. I wrote a basic
+`printf` parser and let that sit. Once I got more work done on mask-
+based formatting, and stepped back to look at things from the top,
+it became clear that supporting traditional `printf` syntax wasn't a
+good fit. For example, conversion specifiers are not needed, because
+we have a rich type system to drive that, which also makes the hash(#)
+flag obsolete. The `%` sigil also doesn't work well, because Red uses
+that for `file!` values. A similar problem faces the standard `$` 
+sigil used for string interpolation in other languages. Red will use
+that for `money!` values.
+
+The design process is both top down and bottom up. Start with ideas
+and examples from a user's perspective, then build a bit to support
+one aspect. Find issues you didn't consider from the outside, move
+back up and revisit assumptions, build another piece. See how those
+two pieces fit together in a larger picture, and where your blue
+sky design falls apart. Only by building things will you start to 
+really feel what works, what doesn't, and where the most devilish
+details start to pop up.
+
+= Use Cases
+
+- Format single values
+- Format a block of values
+- Support formats suited to each datatype
+- Interpolate formatted values into a block
+- Interpolate formatted values in a string
+- Create a formatted row
+- Create a formatted column
+- Create a table
+- Generate values in report templates (build-markup)
+- Format cells in spreadsheets
+- Format given a mask
+- Format given a width
+- Format a number given whole and fraction/decimal widths?
+- Format a number given total and fraction/decimal widths
+- Allow fill string and alignment overrides
+- Support international formatting
+- Support named formats
+
+= Goals and Design Decisions
+
+I looked at a lot of formatting systems over time, and they all
+boil down to a few main paradigms, each just adding their own
+flavor and features. VB and COBOL use mask-based formatting
+(called a PICture clause in COBOL). C, Common Lisp, and...everything
+that followed suit, uses a very terse command string to define the
+total width of a field, number of decimal places, and a few other
+rudimentary options (e.g., sign and fill char). The third paradigm
+is parameterized masks or forms. .NET and Wolfram both use this 
+approach. Add localization and exact/inexact number support, and
+you have a wide range of combinations.
+
+One goal, then, is to make the options managable and usable. Another
+is to make them flexible. A third is to keep things simple. Pick any
+two.
+
+The draft submission for a `format` design won't be exhaustive. There
+are a lot of details yet to be covered. What I hope to do is lay the
+foundation for a design that allows new features to be added as needs
+are discovered.
+
+Another important element is taste. You may not like mine. In some
+ways I want to push the boundaries forward, in others I want to limit
+them. For example, Red is a data language, and highly symbolic. We
+don't often exercise that, but it's there. Because of that, I think
+Wolfram is an important system to learn from. On the other hand, C
+(and `printf`) herald from a system level view, which I think holds 
+less value in Red. For example, `printf` has no concept of group
+separators in numbers. Those are helpful, even for programmers. Why
+would you *not* include them? One reason is `load`ability. Red is a
+data language, and the ability to round-trip values should not be
+overlooked.
+
+There is the issue of internationalization. We can format the data
+for ourselves, but someone else may be looking at it in another part
+of the world, and ambiguity can be a terrible thing. Leaving out
+group separators doesn't solve the problem, because the decimal 
+point may still be a dot/full-stop or a comma. What we need, then,
+is a universal numeric format that is unambiguous. This, again, is
+a "round-trip" form and is, coincidentally, natively supported by
+Red. We should also consider the most common case when sharing 
+technical data, in which the nationality is mathematics.
+
+We can't force people to do the right thing. All we can do is make
+the right thing really easy to do, and discourage bad behavior.
+As you read the notes here, or evaluate the draft code, keep that
+in mind. The goal is not to be all things to all people, or to 
+support existing formats because `language-x` programmers will be
+happy to see it and may adopt Red (they won't). 
+
+== General dialect thoughts.
+
+- Sigils should be chosen for use in a Red context, not simply
+taken from other languages. This is important. We can't judge
+things too quickly, because they're unfamiliar, but still have to 
+acknowledge when certain characters make things look like noise.
+
+- A lot of history exists for formatting layouts and patterns.
+That should not be ignored. The primary driver here, for me, is
+spreadsheets. And while we're thinking at the code level, there
+will almost certainly come a time when an format editor tool 
+will be built.
+
+- We aren't designing for a single target audience or use case.
+As programmers, we may think that something like `printf` is
+enough, and everything beyond that is just bloat and wasted code.
+If you've ever had to write formatted output for business use,
+you know this is not the case, and a *huge* amount of effort goes
+into the tiny details. To this end, we won't have a single dialect
+that covers all our needs, even if there ends up being a single
+`format` function that is an entry point. Scientific computing is
+also growing, and I think we need to consider that target.
+
+= Values
+
+We should leverage types for all they're worth. While it will be nice of
+us to support formatting float as percent, or as money (AHHH!), we
+really need to tell people to use appropriate datatypes.
+
+Being able to access values, when formatting more than a single value at
+at time, including structured values, is convenient. The ability to do
+this has to be balanced against complexity and risk (security).
+
+= Interpolation
+
+In addition to interpolating values in strings, as other languages do,
+we should be able to interpolate formatted values into blocks. 
+
+= Masks versus specifications
+
+Formatting via masks has a rich history. "#,##0.00" tells you what it's
+going to look like, at least roughly. It's a WYSIWYG model. You can tell
+it will have 2 decimal places, at least one leading zero, and use the 
+comma as a group separator. There are subtleties of course. ".00" may 
+mean "at least", "at most", or "exactly" 2 digits. If you figure out that
+"#" means an optional digit, you can guess ".00" doesn't mean "at most".
+It still doesn't tell you which of the other two it is. 
+
+Specifications, as used in `printf`, give you 2 widths. e.g., %5.2f. You
+might think that's clearer, but it's not. Is 5 the total width, or the
+number of whole digits? The min/max/exact question is the same.
+
+To know the behavior, you need to read the docs. Even then, formatting
+behavior isn't always clear. Once you take into account sign options,
+alignment, group separators, and alternate fill characters.
+
+
+= Format Styles (Named formats) TBD
+
+Long format masks don't work well in interpolated strings, and are a pain
+to type repeatedly. Terse, short-format specs aren't always immediately
+clear in what their output looks like. The strengths of one are the 
+weaknesses of the other. The solution I'm moving toward is "named styles".
+It's not a new concept, but the approach I will take is more like using
+style sheets than trying to build in every style and locale combination.
+The library of them will naturally grow over time, and may become standard,
+especially in larger internationalized systems. The standard system should
+cover basic needs, and allow users to easily extend it.
+
+
+= Short Formats (ala `printf`)
+
+Short-formats are like `printf`, but not exactly the same. Don't compare
+the output to `printf` as a point of reference.
+
+NOTE: The exact behavior isn't nailed down on this yet. The current implementation
+      allows the deci point to float, based on value, precision, and alignment.
+      That's how printf seems to do it, at least some of them. It feels like
+      spec'ing a precision should make that part fixed.
+
+- Flags are "<>_+0Zz$¤º"
+  [left-align right-align space-for-+  +-for-+  zero-fill(0Zz) money($¤) ordinal]
+  0 is a bit confusing in some cases, because it could be the last flag char, but
+  then you may have leading 0s in the width, that follows. Have to decide if
+  it's worth keeping. `¤` is not a well-known character but is a universal currency
+  symbol, but `$` is most universal. If we want to use something that is replaceable,
+  for localization, and clearly not USD, `¤` makes sense. Otherwise `$` seems best.
+  `£` and `€` are the next most common characters to consider, but suffer the same
+  specificity problem as `$`. Rebol supports 3-letter ISO4217 codes on money! vals.
+  See: https://en.wikipedia.org/wiki/Currency_sign_(typography)
+
+- Width+precision are [m][.n] 
+
+The sigil is the hardest thing to choose. `%` is for files in Red. I like `:`,
+since it is like `get-word!` syntax, implying that we're getting a value to
+interpolate into a string. If we also end the format with it, it's a get-set op,
+implying getting a value and applying the format to it. The other big question
+is whether short-format strings need to be structured. e.g. :[...]: or :(...):.
+I think those apply to string interpolation, not single value short format
+applications.
+
+The biggest downside to `:` as a sigil is time values.
+
+Alt sigil ideas: _=&@! But I don't really care for any of them.
+
+I don't like ~ or ` as sigil options either.
+
+Escaping the sigil with the standard escape character isn't beautiful either
+(`^^:`), but I don't want to double characters as an escape mechanism when
+we already have a known escape pattern.
+
+
+= Contexts and Functions
+
+_**There are some long and some terrible names in place. Known and sometimes intentional.**_
+
+Naming is important, and more thought will go into things. As I
+work through examples, I sometimes need to give things names that
+are very clear, breaking pieces down by named functionality. But
+I can't pick the best names, because the structure isn't nailed
+down yet. This also affects dependencies. As code is merged, 
+more common bits can be shared.
+
+There are likely to be multiple contexts under the formatting
+banner, but the current code structure isn't intended to be the
+final design.
+
+There are functions for internal use, functions intended as the
+public API, and functions that may be useful and so are exported
+from the contexts. We'll label these Private, Major, and Minor,
+respectively.
+
+== List of current funcs
+
+....
+    Name                     Type   Purpose
+
+    composite                Major  Replace :( ... ): sections in a string with their evaluated results.
+    ordinal-suffix           Minor  Return the ordinal suffix for a number (th, st, nd, rd, etc.)
+    as-ordinal               Minor  Return the ordinal string for a number (1st, 2nd, 3rd, etc.)
+    format-bytes             Major  Return a string containing the size and units, auto-scaled by default
+    format-logic             Major  Format a logic value as a string, custom or named format
+    format-string            Major  Alignment is the main feature, with alt fill, and case changes
+    fill                     Minor  Efficiently fill a template string with a formed value (maybe Private)
+    form-num-with-group-seps Minor  Insert group separators into a numeric string
+    form-num-ex              Major  Extended FORM for numbers, lets you control E notation and rounding
+    format-number-by-width   Minor  Formats a number given a total length and a maximum number of decimal digits. No separators added.
+    format-number-with-mask  Minor  Return a formatted number, using a mask as a template
+    format-number-via-masks  Minor  Format, selecting the mask based on the number's value
+    format-number-with-style Minor  Return a formatted number, by named style
+    short-form               Major  Format and substitute values into a template string
+    block-form               Major  Format and substitute values into a template block
+    format                   Major  General formatting entry point (TBD)
+    
+    (more to come)
+....
+
+Other helper funcs will also be added. `Format` will be the main entry point,
+and will dispatch to sub-funcs like `format-number`, `format-date-time`, etc.,
+based on datatype. It may also dispatch based on style. e.g., if the style name
+given is `bytes`, it will dispatch to `format-bytes`. Row, column, and table
+formatting may be addded as well. I have an old string formatter, including
+capitalization and case control. Those aren't currently included.
+
+
+
+== Composite
+
+> "Replace :( ... ): sections with their evaluated results."
+
+The name of the function (`composite`) is tricky. Rebol calls this
+`build-markup`, which isn't bad, but defines a more limited view of its 
+use, as well as implying that you are building the markup itself, when
+the markup is really the template you're filling in. 
+
+We want a word that says it operates on a single argument, so things like
+`intersperse`, `substitute`, and `interject` don't read as well to me. It sounds
+like they take something(s) to insert. `Inset` is too close to `insert`. Another
+option is a neologism, like `interform`, which implies both putting a thing in a
+place, and forming it. `Composite` is generally used as a term related to
+image processing, which is a possible point of confusion. It is also both a noun
+and a verb, which works well in this case.
+
+There isn't much to this function in the way of design, with only a few
+major decisions to be made:
+
+1. What are the start/end markers for substitution expressions?
+2. What do we do in the case of mismatched markers?
+3. Does it take a single string, and work like `build-markup`, operating
+   globally, or is it obsoleted by `short-format` (temp name) that does
+   general string interpolation?
+
+The `:( ... ):` markers already have meaning in Red. Colons are used to
+get and set values, and parens indicate evaluation.
+
+Putting the colons on the outside gives you a clean paren expression on the
+inside. Rebol used `<% ... %>` as its markers, inspired by PHP I think, and
+comfortable for tag-people I suppose. We shouldn't rule a tag-based syntax
+out entirely.
+
+One of the big questions is what to do if there are mismatched expr markers. We
+can treat them as errors, or just pass through them, so they will be visible in
+the output. We can support both behaviors with a refinement, and then just need
+to choose the default.
+
+Spec:
+....
+    data [string! file! url!]
+    /err-val e "Use instead of formed error info from eval error"
+....
+
+Examples:
+....
+Composite
+    ""                      == ""
+    ":(1):"                 == "1"
+    ":(pi):"                == "3.141592653589793"
+    ":(rejoin ['a 'b]):"    == "ab"
+    "a:('--):b"             == "a--b"
+    "a:('--):"              == "a--"
+    ":('--):b"              == "--b"
+    "ax:(1 / 0):xb"         == "ax *** Error: zero-divide Where: 1 / 0 *** xb"
+    ":("                    == ":("
+    ":('end"                == ":('end"
+    "):"                    == "):"
+    ")::("                  == ")::("
+
+    "alpha: :(rejoin ['a 'b]): answer: :(42 / 3):" == "alpha: ab answer: 14"
+
+    ; No sample data to go with this in the doc
+    {
+        name: :(form-full-name cust):
+        rank: :(as-ordinal index? find scores cust):
+        ser#: :(cust/uuid):
+    }
+
+    ; With spaces around the expressions
+    "a :('--): b"           == "a -- b"                                             
+    "a :('--):"             == "a --"                                                 
+    ":('--): b"             == "-- b"                                                 
+    "ax :(1 / 0): xb"       == "ax  *** Error: zero-divide Where: 1 / 0 ***  xb"
+
+Composite/err-val input "#ERR"
+
+    "ax:(1 / 0):xb"         == "ax#ERRxb"
+    "ax :(1 / 0): xb"       == "ax #ERR xb"
+....
+
+== ordinal-suffix
+
+> Return the ordinal suffix for a number (th, st, nd, rd, etc.)
+
+The reason for not keeping this private is that it may be useful when combined
+with markup language generation, where a superscript style may be applied. It
+may not be worth it though.
+
+Spec:
+....
+    val [integer!]
+....
+
+Examples:
+....
+    >> ordinal-suffix 1
+    == st
+    >> ordinal-suffix 2
+    == nd
+    >> ordinal-suffix 3
+    == rd
+    >> ordinal-suffix 4
+    == th
+....
+
+== as-ordinal
+
+> Return the ordinal string for a number (1st, 2nd, 3rd, etc.)
+
+Sure, you can say "The value at index 1234", or list the top ranked players as
+"First, Second, Third", but "You came in two hundred and seventy second" isn't
+so great.
+
+Spec:
+....
+    val [integer!]
+....
+
+Examples:
+....
+    >> as-ordinal 1
+    == "1st"
+    >> as-ordinal 2
+    == "2nd"
+    >> as-ordinal 3
+    == "3rd"
+    >> as-ordinal 124
+    == "124th"
+....
+
+== format-bytes
+
+> "Return a string containing the size and unit suffix, auto-scaled"
+
+File sizes anyone? Download progress?
+
+Spec:
+....
+    size [number!]
+    /to scale "Rounding precision; default is 1"
+    /as unit [word!] "units: [bytes KiB MiB GiB TiB PiB EiB ZiB YiB]"
+    /sep  ch [char! string!] "Separator to use between number and unit"
+    /SI "Use SI unit size of (1000); units: [bytes kB MB GB TB PB EB ZB YB]"
+....
+
+Examples:
+....
+    >> format-bytes 4000
+    == "4KiB"
+    >> format-bytes 400000
+    == "391KiB"
+    >> format-bytes 400000000
+    == "381MiB"
+    >> format-bytes/as 400000000 'KiB
+    == "390625KiB"
+    >> format-bytes/as 400000000 'KB
+    *** User Error: "KB is not a valid unit for format-bytes"
+    *** Where: ???
+    >> format-bytes/as/si 400000000 'KB
+    == "400000KB"    
+    >> format-bytes/as 400000000 'GiB            ; Note rounding!
+    == "0GiB"
+    >> format-bytes/as/to 400000000 'GiB .01
+    == "0.37GiB"
+    >> format-bytes/sep 500 #" "
+    == "500 bytes"
+....
+
+== format-logic/mold-logic
+
+> Format a logic value as a string, custom or named format
+
+We have alternate lexical forms for logic values, but no standard way to create
+them. Form-logic returns a string, while mold-logic returns a word and doesn't
+support custom formats (MOLDed results should be LOADable). Useful in code
+generators.
+
+Spec:
+....
+    form-logic
+        value [logic!] "If a custom format is used, fmt/1 is for true, fmt/2 for false"
+        fmt   [word! string! block!] "Custom format, or one of [true-false on-off yes-no TF YN]"
+
+    mold-logic
+        value [logic!]
+        /true-false "(default)"
+        /on-off
+        /yes-no
+....
+
+Examples:
+....
+    >> form-logic true 'on-off
+    == "On"
+    >> form-logic true 'yes-no
+    == "Yes"
+    >> form-logic true 'TF
+    == "T"
+    >> form-logic true 'YN
+    == "Y"
+    >> form-logic true [Yeah! No-way!]
+    == "Yeah!"
+    >> form-logic false [Yeah! No-way!]
+    == "No-way!"
+    >> mold-logic/on-off true
+    == on
+    >> mold-logic/on-off false
+    == off
+    >> mold-logic/yes-no true
+    == yes
+    >> mold-logic/yes-no false
+    == no
+....
+
+== format-string
+
+We have `pad` as a standard today, and that's the main feature when formatting
+strings, so the rest may be moot. The one alignment feature it doesn't offer
+is centering, and it is limited to single char values for fill. Aside from that,
+the name is the main thing to consider. I've always felt, and this is very
+subjective, that `pad` leaves room for confusion. The doc string makes it clear,
+and the default is a good choice. It's just a matter of remembering that pad
+is the opposite of align. i.e., `pad(/right)` is the default, which gives you a
+left-aligned string, while `pad/left` right aligns the string.
+
+Internally, formats with named fields for alignment will use `align` or `justify`
+as the name.
+
+Two other possible features for string formatting are simple and complex case
+control. Simple means changing to upper or lowercase, perhaps with a `/part`
+option. Complex means smart capitalization. This requires a small set of rules,
+which can cover a lot of ground. Options like CamelCase are simple, but of 
+questionable value. Mixed case formatting is perhaps most useful when dealing
+with scraped data, which may be in all caps.
+
+The interface, as with others gives a choice between a standard function with
+refinements model, a structured spec, or a dialect. The dialect can be very
+simple, because there are few options and each has a distinct type or keyword.
+Integer! for width, [left center right] for alignment, string or char for fill,
+and possibly [upper lower mixed] for case keywords. Optional param names could
+also be included, effectively making the dialect look like a strutcured spec
+when they are used.
+
+Spec:
+....
+
+....
+
+Examples:
+....
+
+....
+
+
+== form-num-with-group-seps
+
+> Insert group separators into a numeric string
+
+Format masks also do this, with more control, but they are currently much slower
+than this function. This function is very simple, just walking the whole part of
+the number in reverse, inserting separator values every N digits.
+
+Spec:
+....
+    num [number! any-string!]
+    /with sep [string! char!]
+    /every ct [integer!]
+....
+
+Examples:
+....
+>> form-num-with-group-seps 1234567.89
+== "1,234,567.89"
+>> form-num-with-group-seps/with 1234567.89 #"'"
+== "1'234'567.89"
+>> form-num-with-group-seps/with/every 1234567.89 #"'" 2
+== "1'23'45'67.89"
+....
+
+
+== form-num-ex
+
+> Extended FORM for numbers, lets you control E notation and rounding
+
+The model used in this function gives you greater control in some ways, but
+less in others. By default, it works just like `form`, but gives you the ability
+to round, so you don't have to do that separately. It doesn't give you any way
+to include group separators, but that can be done with `form-num-with-group-seps`
+that can operate on preformed numbers. It also has no concept of masks, extra
+text, or padding/alignment. What it *does* give you is the ability to select
+3 alternate forms, along with a custom override. These let you control when
+scientific notation kicks in, and formats negative numbers in a standard way
+if the `acct` type is used.
+
+The abbreviated format style names are a compromise between single letters
+used in some system, and full words, which would be quite long in this case.
+Single letters aren't clear, where `E` would make sense for scientific notation,
+but might be confused with "E" for Engineering.
+
+....
+    Type    Meaning
+    gen     General form, default, same as `form`
+    sci     Scientific form. Always 1 digit left of the decimal point.
+    eng     Engineering form; 1-3 digits left of the decimal point, with
+            an exponent that is always a multiple of 3.
+    acct    Never use E notation. Use paretheses around negative numbers.
+            Currently, there are still limits (1e16/9e-15), because we're
+            not doing this down at the metal. We're just tricking Red's
+            standard `form` for our uses.
+....
+
+In addition, you can provide a custom function to control when E notation 
+should be used. For example, if you want E notation to be used consistently,
+at 8 places, you could use this function:
+
+	cust-exp-fn: formatting/make-exponent-function [
+	    either any [e < -7  e > 7][e][none]
+	]
+
+    form-num-ex/type 124123234.5678     :cust-exp-fn == "1.241232345678e8"
+    form-num-ex/type 14123234.5678      :cust-exp-fn == "14123234.5678"
+    form-num-ex/type 0.0000000123456789 :cust-exp-fn == "1.23456789e-8"
+    form-num-ex/type 0.000000123456789  :cust-exp-fn == "0.000000123456789"
+
+Spec:
+....
+    n [number!]
+    /type t [word! function!] "[gen sci eng acct] or custom exponent function; default is 'gen"
+    /to scale [number!] "Rounding scale (must be positive)"
+....
+
+Examples:
+....
+    >> form-num-ex/type/to 123.45% 'gen 10%
+    == "120%"
+    >> form-num-ex/type/to 123.45% 'gen 1% 
+    == "123%"
+    >> form-num-ex/type/to 123.45% 'gen .1 
+    == "123.5%"
+
+    >> form-num-ex/type 1234500.0 'eng      
+    == "1.2345e6"
+    >> form-num-ex/type 12345000.0 'eng     
+    == "12.345e6"
+    >> form-num-ex/type 123'450'000.0 'eng  
+    == "123.45e6"
+    >> form-num-ex/type 1'234'500'000.0 'eng
+    == "1.2345e9"
+
+    >> form-num-ex/type 12345.0 'sci  
+    == "1.2345e4"
+    >> form-num-ex/type 123450.0 'sci 
+    == "1.2345e5"
+    >> form-num-ex/type 1234500.0 'sci
+    == "1.2345e6"
+
+    >> form-num-ex/type 12345.0 'acct
+    == "12345.0"
+    >> form-num-ex/type -12345.0 'acct
+    == "(12345.0)"
+    >> form-num-ex/type/to -12345.6789 'acct .01
+    == "(12345.68)"
+    >> form-num-ex/type/to 12345.6789 'acct 25
+    == "12350"
+....
+
+
+== format-number-by-width
+
+> Formats a number given a total length and a maximum number of decimal digits.
+
+No separators are added by this function. It is still a little more involved,
+as it lets you control width, precision, alignment, sign, and fill char. Just
+allowing the fill char to be #"0" adds logic, when you take the sign into 
+account. 
+
+Some behavior still TBD. e.g., should prec be fixed or max digits. Another
+internal func uses a separate `align` param, rather than `left/right`
+refinements. Using `left/right` saves a param over `/align dir` and will catch
+more errors.
+
+Short-form could use this internally. It doesn't right now, just because of
+the way experiments progressed. Very little code sharing refactoring has been
+done in the current code.
+
+Spec:
+....
+    value   [number!]  "The value to format"
+    tot-len [integer!] "Minimum total width. (right justified, never truncates)"
+    dec-len [integer!] "Maximum digits to the right of the decimal point. (left justified, may round)"
+    /left   "Left align"
+    /right  "Right align (default)"
+    /use+   "Include + sign for positive values"	
+    /with
+        ch  [char!]    "Alternate fill char (default is space)"
+....
+
+Examples:
+....
+>> format-number-by-width 0 0 0
+== "0"
+>> format-number-by-width 1 0 0
+== "1"
+>> format-number-by-width 123.456 0 0
+== "123"
+>> format-number-by-width -123.456 0 0
+== "-123"
+
+>> format-number-by-width 10.5% 0 0
+== "11%"
+>> format-number-by-width -10.5% 0 0
+== "-11%"
+>> format-number-by-width/with -10.5% 8 2 #"0"
+== "-0010.5%"
+>> format-number-by-width/with -10.56% 8 2 #"0"
+== "-010.56%"
+
+>> format-number-by-width/with -10.5 8 2 #"0"
+== "-00010.5"
+>> format-number-by-width/with/use+ 10.5 8 2 #"0"
+== "+00010.5"
+>> format-number-by-width/with/left 10.5 8 2 #"0"
+== " 10.5000"
+>> format-number-by-width/with 10.5 8 2 #"0"
+== "000010.5"
+>> 
+>> format-number-by-width/with -10.5 8 2 #"0"
+== "-00010.5"
+>> format-number-by-width/with -10.5 8 2 #"_"
+== "___-10.5"
+>> format-number-by-width/with -10.5% 8 2 #"0"
+== "-0010.5%"
+>> format-number-by-width/with/use+ 10.5 8 2 #"_"
+== "___+10.5"
+
+>> format-number-by-width 0 5 0
+== "    0"
+>> format-number-by-width 1 5 0
+== "    1"
+>> format-number-by-width 123.456 5 0
+== "  123"
+>> format-number-by-width -123.456 5 0
+== " -123"
+>> format-number-by-width 123.456 5 2
+== "123.46"
+>> format-number-by-width -123.456 5 2
+== "-123.46"
+
+>> format-number-by-width 123.456 10 0
+== "       123"
+>> format-number-by-width -123.456 10 0
+== "      -123"
+>> format-number-by-width/left 123.456 10 2
+== " 123.46   "
+>> format-number-by-width/right -123.456 10 2
+== "   -123.46"
+
+>> format-number-by-width/left/use+ 123.456 10 2
+== "+123.46   "
+>> format-number-by-width/right/use+ 123.456 10 2
+== "   +123.46"
+....
+
+== format-number-with-mask
+
+> Return a formatted number, using a mask as a template
+
+Important note: This doesn't handle E formed numbers yet. It also
+doesn't support E to control the format string in any way. I have
+notes on both general scientific and also engineering formatting,
+which we'll probably want to support, but they aren't in place yet.
+
+Important note: Masks don't currently auto-extend, which is a nice
+feature we should include. Right now, if your number is longer than
+the mask, digits from it will continue to be included, but extra
+group separators and such are not intuited.
+
+=== Mask format
+
+    Char    Meaning
+
+    ^^      Use next literal char from mask
+    0       Digit placeholder, show 0 if num has no digit there
+    ?9      Digit placeholder, show space if num has no digit there
+            (we'll pick just one of these chars eventually)
+    #       Digit placeholder, show nothing if num has no digit there
+    (       ( for negative numbers, nothing for positive
+    )       ) for negative numbers, space for positive
+    +       - for negative numbers, + for positive
+    -       - for negative numbers, space for positive
+    "..."   Literal text between quotes
+    $%£¥€¢¤ Pass thru (special char list TBD)
+    ' ·_    Group separators (final list TBD)
+    ,.      Decimal/Group separators (heuristics driven)
+    
+The `,.` Decimal/Group separators are the tricky bit. Basically, we
+parse the mask and make our best guess about which one is supposed
+to be the decimal marker, and which is the group separator. I tried
+a new approach for this, different from what I did in R2. It's more
+flexible, allows international support, etc., but it's also ugly and
+slow. Good thing it's just proof of concept for dialect design.    
+
+NOTE: Should we truncate based on mask precision? Currently it is up
+      to the caller to round, but it makes sense for the mask to 
+      control rounding.
+      Should we allow separators in the decimal portion?
+
+Spec:
+....
+	n [number!]
+	mask [string!]
+....
+
+Examples:
+....
+      Value          Mask                    Result
+    -12345.67     " ######"                 "- 12345"
+    -12345.67     "-??????"                 "- 12345"
+    -12345.67     " 999999"                 "-  12345"
+    -12345.67     "-000000"                 "-012345"
+    -12345.67     "-$000 000.000"           "-$012 345.670"
+    -12345.67     "-$999 999.999"           "-$ 12 345.67 "
+    -12345.67     "-$9_99_999.999"          "-$ 12_345.67 "
+    -12345.67     "$(999 999.999)"          "$( 12 345.67 )"
+    -12345.67     "$(### ###.999)"          "$(12 345.67 )"
+    123456.78     "£+ 999,990.000"          "£+ 123,456.780"
+    123456.78     "£ 999,990.000"           "£ 123,456.780"
+    -123456.78    "£ 999,990.000"           "-£ 123,456.780"
+    -12345.67     "-###,##0.000"            "-12,345.670"
+    -1234.67      "-###,##0.00?"            "-1,234.67 "
+    -123.45       "-###,##0.000"            "-123.450"
+    -12345.67     "-#,##0.000"              "-12,345.670"
+    -12345.67     "-##.##0,000"             "-12.345,670"
+    -12345.67     "-#.##0,000"              "-12.345,670"
+    12345.67      "-#,##0.000"              "1 2,345.670"       ; Mask too short; note glitch.
+    12345.67      "#,##0.000"               "12,345.670"
+    12345.67      "+#,##0.000"              "+12,345.670"
+    -12345.6789   "-#,###,##0.0##,###,#"    "-0.01,234,5"
+    -12345.6789   "-#.###.##0,0##.###.#"    "-..0,01.234.5"
+    -12345.6789   "-# ### ##0.0## ### #"    "- 12 345.678 9 "
+    -12345.6789   "-#'###'##0.0##'###'#"    "-12'345.678'9"
+    -12345.67     "-£##.##0,000"            "-£12.345,670"
+    -12345.67     {-##.##0,000" F"}         "-12.345,670 F"
+    -12345.67     {"kr"-##.##0,000}         "kr-12.345,670"
+    -12345.67     "€ ##.##0,000-"           "€ 12.345,670-"
+    -12345.67     "($##.##0,000)"           "($12.345,670)"
+    -12345.67     "-£##.###.##0,000"        "-£12.345,670"
+    -12345.67     {-##.###.##0,000" F"}     "-12.345,670 F"
+    -12345.67     {"kr"-##.###.##0,000}     "kr-12.345,670"
+    -12345.67     "€ ##.###.##0,000-"       "€ 12.345,670-"
+    -12345.67     "($##.###.##0,000)"       "($12.345,670)"
+    0.0001        "0"                       "0"
+    0.0001        ".00000"                  "0.00010"
+    0.0001        "0.#"                     "0.0001"
+    0.0001        ".#"                      "0.0001"
+    0.0001        "0.#"                     "0.0001"
+    1.0e-8        ".00000"                  "0.00000001"
+    1.0e-14       ".00000"                  "0.00000000000001"
+    1e-5%         "#.000%"                  make error! [... "format-number-with-mask doesn't like -1e-5%"
+    -1e-5%        "#.000%"                  make error! [... "format-number-with-mask doesn't like -1e-5%"
+    0.4567%       "#.000%"                  "0.4567%"
+    -0.4567%      "#.000%"                  "-0.4567%"
+    1.4567%       "##,##0.000%"             "1.4567%"
+    12.4567%      "##,##0.0#"               "12.4567"
+    123.4567%     "##,##0.000%"             "123.4567%"
+    12345.6789%   "##,##0.000%"             "12,345.6789%"
+    -123.4567%    "#,##0.000%"              "-123.4567%"
+    123.4567%     "##.##0,000%"             "123,4567%"
+    -123.4567%    "#.##0,000%"              "-123,4567%"
+....
+
+== format-number-via-masks (TBD)
+
+> Format, selecting the mask based on the number's value
+
+This concept is taken from the world of spreadsheets. Rather than making you
+manually select a mask by looking at a number's value, you give the system
+options for each case you want to handle. Normally
+`<POSITIVE>;<NEGATIVE>;<ZERO>;<TEXT>`. In my R2 system, I also allowed blocks
+with named selectors, which I plan to extend in the Red system to support
+functions as tests, which will let the system handle special values like
+`1.#INF` and `1.#NaN`. Another likely extension is the ability to use short-
+format specifications and named styles for each section or test.
+
+Spec:
+....
+    n [number!]
+    masks [string! block! map!] "Masks appplied based on the sign or special value of n"
+....
+
+Examples:
+....
+    TBD
+....
+
+== format-number-with-style
+
+> Return a formatted number, by named style
+
+Predefined styles may dispatch to any other internal function to handle
+formatting, or may do it directly. In the future, it could also allow styles
+to be created and used directly.
+
+=== styles
+
+    Name            Format
+
+    r-general       r- prefix means to use Red (round-trip) group sep (')
+    r-standard
+    r-fixed 
+    r-money
+    r-currency
+    r-percent
+    r-ordinal
+    r-hex   
+            
+    gen general     Comma as group sep
+    standard
+    fixed   
+    money   
+    currency
+    percent 
+    ordinal 
+
+    sci scientific
+    eng engineering
+    acct accounting
+            
+    base-64 
+    hex     
+    min-hex         Hex with no leading 0s
+    C-hex           Hex with "0x" prefix
+    bin     
+    binary  
+    min-bin         Binary with no leading 0s
+            
+
+Spec:
+....
+    n [number!]
+    name [word!] "Named or direct style" ; object! map!
+....
+
+Examples:
+....
+    >> format-number-with-style 12345.678 'r-general
+    == "12'345.678"
+    >> format-number-with-style 12345.678 'r-standard
+    == "12'345.678"
+    >> format-number-with-style 12345.678 'r-fixed
+    == "12'345.68"
+    >> format-number-with-style 12345.678 'r-currency
+    == "$12,345.68"
+    >> format-number-with-style 12345.678 'r-money
+    == "$12,345.68"
+    >> format-number-with-style 12345.678 'r-percent
+    == "1'234'567.8%"
+    >> format-number-with-style 12345.678 'r-ordinal
+    == "12'345th"
+
+    >> format-number-with-style 12345.678 'general
+    == "12,345.678"
+    >> format-number-with-style 12345.678 'standard
+    == "12,345.678"
+    >> format-number-with-style 12345.678 'fixed
+    == "12,345.68"
+    >> format-number-with-style 12345.678 'currency
+    == "$12,345.68"
+    >> format-number-with-style 12345.678 'money
+    == "$12,345.68"
+    >> format-number-with-style 12345.678 'percent
+    == "1,234,567.8%"
+    >> format-number-with-style 12345.678 'ordinal
+    == "12,345th"
+
+    >> format-number-with-style 32767 'hex
+    == "00007FFF"
+    >> format-number-with-style 32767 'min-hex
+    == "7FFF"
+    >> format-number-with-style 32767 'C-hex
+    == "0x00007FFF"
+    >> format-number-with-style 32767 'bin
+    == "00000000000000000111111111111111"
+    >> format-number-with-style 32767 'min-bin
+    == "111111111111111"
+    >> 
+....
+
+== short-form (printf, but not)
+
+> Format and substitute values into a template string
+
+This is where things start to get fun. The basic idea is simple, you mark
+up a string with placeholders where formatted data will be substituted.
+The system finds those markers, figures out the formatting details, pulls
+a piece of data, applies the format, and builds a new string with all the
+replacements made.
+
+Placeholders (let's call them fields) look like this:
+
+* `/[key][:[flags][width][.precision]]['style]`
+* `:[flags][width][.precision]['style]`
+* `:[flags]['style]`
+
+That is, a key that starts with a slash, with an optional format. Or just
+a format, which starts with a colon. Take a deep breath, there's a lot
+going on here.
+
+NOTE: One of the goals with the above syntax was to keep it minimally
+      invasive in strings. However, if we can live with extra noise,
+      the `:(...):` syntax could be used, which would make it even
+      closer to `composite` and `block-form`. In fact, it would likely
+      then take on *exactly* `block-form` syntax, and they could share
+      a parser. More verbose though, with required whitespace, etc.
+
+A `key` can be an integer, name, or expression to evaluate. Where `printf`
+naturally consumes the next arg for each field, we do the same thing if
+no key is given. That's where your field starts with `:` rather than `/`.
+If there *is* a key, how it behaves depends on the data. Basically, we 
+have 5 types of keys and two main categories of data. The data categories
+we'll call `structured` and `unstructured`. Structured data are blocks,
+maps, and objects. Everything else is unstructured.
+
+== Key types
+
+Remember, keys start with `/` as their sigil in the template string
+
+....
+    Type        Format
+    
+    none        :<format only>
+    integer     /3
+    paren       /(calc-value)
+    path        /name/last
+    word        /last-name
+....
+
+=== Unstructured Data Behaviors
+
+....
+    Key Type    Action
+    
+    none        Use the entire data value
+    integer     If data is a series, pick from it; else none
+    paren       Do paren
+    path        Evaluate the path, e.g., now/time
+    word        Evaluate the word, e.g., global-var
+....
+
+=== Structured Data Behaviors
+
+....
+    Key Type    Action
+    
+    none        If data is a series, pick first and advance; else none
+    integer     Pick from data if series, or from `values-of data` if object/map
+    paren       Do paren
+    path        Try to find deep key in data first, else evaluate the path
+    word        Try to find key in data first, else evaluate the word
+....
+
+Something interesting to consider here is whether key lookups should always
+start at the head of the series, as it may have been advanced. This gets
+especially tricky, because you might have advanced an odd/unknown number of
+values. We might also then want a way to skip to a new index in the values.
+For that reason, we may discourage the mixing of keyed and unkeyed access.
+People may confuse themselves, and I am people.
+
+== Format specifications
+
+Formats follow the basic idea from `printf`, but do not share its exact syntax.
+
+* `:[flags][width][.precision]['style]`
+* `:[flags]['style]`
+
+That is, zero or more flags, followed by an optional width and precision, with a
+style name option as well. Style design isn't fully in place yet, but it may
+either be an override for the other options, or the other options may merge into
+the style. For example, you could use the 'accounting style, but override the
+size.
+
+Flags:
+....
+    Char    Meaning
+
+    _       No behavior, but can be used before 0 as the first flag in `block-form`
+    +       Show + instead of space for positive number's sign
+    0       Set fill char to 0 instead of space. (Can't be first flag char in `block-form`)
+    <       Left align
+    >       Right align (default)
+    Zz      Set fill char to 0 instead of space. (May remove 0 flag. This is better.)
+    º       Ordinal (char 186)
+    $¤      Money (¤ is char 164)
+    
+....
+
+
+Spec:
+....
+    string [string!] "Template string containing `/value:format` fields and literal data"
+    data "Value(s) to apply to template fields"
+....
+
+Examples:
+....
+apply-test
+    INPUT:  "test"
+    VALUE:  123.456
+    OUTPUT: "test"
+apply-test
+    INPUT:  ":20.10"
+    VALUE:  123.456
+    OUTPUT: "             123.456"
+apply-test
+    INPUT:  ":<10"
+    VALUE:  123.456
+    OUTPUT: "123.456   "
+apply-test
+    INPUT:  ":>10"
+    VALUE:  123.456
+    OUTPUT: "   123.456"
+apply-test
+    INPUT:  ":07.1"
+    VALUE:  123.456
+    OUTPUT: "00123.5"
+apply-test
+    INPUT:  ":00.1"
+    VALUE:  123.456
+    OUTPUT: "123.5"
+apply-test
+    INPUT:  ":015.4"
+    VALUE:  123.456789
+    OUTPUT: "0000000123.4568"
+apply-test
+    INPUT:  ":Z0.1"
+    VALUE:  123.456
+    OUTPUT: "123.5"
+apply-test
+    INPUT:  ":5.1"
+    VALUE:  123.456%
+    OUTPUT: "123.5%"
+apply-test
+    INPUT:  ":5.2"
+    VALUE:  123.456%
+    OUTPUT: "123.46%"
+apply-test
+    INPUT:  ":10.3"
+    VALUE:  123.456%
+    OUTPUT: "  123.456%"
+apply-test
+    INPUT:  ":10.4 :8.2 :5.0"
+    VALUE:  -123.456%
+    OUTPUT: "- 123.456% -123.46% -123%"
+apply-test
+    INPUT:  ":º"
+    VALUE:  1
+    OUTPUT: "1st"
+apply-test
+    INPUT:  ":º"
+    VALUE:  15
+    OUTPUT: "15th"
+apply-test
+    INPUT:  ":º"
+    VALUE:  123
+    OUTPUT: "123rd"
+apply-test
+    INPUT:  ":$"
+    VALUE:  123
+    OUTPUT: "$123.00"
+apply-test
+    INPUT:  ":¤"
+    VALUE:  123
+    OUTPUT: "$123.00"
+apply-test
+    INPUT:  ":/pi"
+    VALUE:  123.456
+    OUTPUT: "123.4563.141592653589793"  ; Note the leading colon, which consumes the value
+apply-test
+    INPUT:  "/system/words/pi"
+    VALUE:  123.456
+    OUTPUT: "3.141592653589793"
+apply-test
+    INPUT:  "/now/time"
+    VALUE:  123.456
+    OUTPUT: "1:04:53"
+apply-test
+    INPUT:  "/(1 + 1)"
+    VALUE:  123.456
+    OUTPUT: "2"
+apply-test
+    INPUT:  {Color :<10, number1 :3, number2 :05, float :<5.2.\n}
+    VALUE:  ["Red" 2 3 -45.6]
+    OUTPUT: {Color Red       , number1   2, number2 00003, float -45.6.\n}
+apply-test
+    INPUT:  "Color: :<10, number1/ :3, http://:2, float: :<5.2"
+    VALUE:  ["Red" 3 8080 -45.6]
+    OUTPUT: {Color: Red       , number1/   3, http://8080, float: -45.6}
+apply-test
+    INPUT:  {Color :'general | idx3 /3:'money | num2 /N2:<'general | pi /system/words/pi:<'fixed | /(1 + 1) /now/time}
+    VALUE:  [ "Red" n2 2 3 n4 -45.6 ]
+    OUTPUT: {Color TBD: apply-format-style for non-number | idx3 $2.00 | num2 2 | pi 3.14 | 2 1:04:53}
+apply-test
+    INPUT:  {Color :<5| idx3 /3:Z3| num2 /N2:<5| pi /system/words/pi:<5.2| /(1 + 1) /now/time}
+    VALUE:  [ "Red" n2 2 3 n4 -45.6 ]
+    OUTPUT: {Color Red  | idx3 002| num2 2    | pi 3.14 | 2 1:04:53}
+apply-test
+    INPUT:  {Color :<5| idx3 /3:Z3| num2 /N2:<5| pi /system/words/pi:<5.2| /(1 + 1):z3 |/now/time/precise:10|/fn}
+    VALUE:  [ "Red" n2 2 3 n4 -45.6 fn func [][42] ]
+    OUTPUT: {Color Red  | idx3 002| num2 2    | pi 3.14 | 002 |1:04:53.072|42}
+apply-test
+    INPUT:  {First: /first:<8| Last: /last:8| phone: /phoneX | /3}
+    VALUE:  [ first: "Gregg" last: "Irwin" phone: #208.461.9999 ]
+    OUTPUT: "First: Gregg   | Last:    Irwin| phone:  | last"
+apply-test
+    INPUT:  {First: /name/first:<8| Last: /name/last:8| phone: /name/phoneX | /3}
+    VALUE:  [ name: [first: "Gregg" last: "Irwin" phone: #208.461.9999] ]
+    OUTPUT: "First: Gregg   | Last:    Irwin| phone:  | "
+apply-test
+    INPUT:  {First: /first:<8| Last: /last:8| phone: /phoneX | /3}
+    VALUE:  make object! [ first: "Gregg" last: "Irwin" phone: #208.461.9999 ]
+    OUTPUT: {First: Gregg   | Last:    Irwin| phone:  | 208.461.9999}
+apply-test
+    INPUT:  {First: /name/first:<8| Last: /name/last:8| phone: /name/phoneX | /3}
+    VALUE:  make object! [ name: make object! [ first: "Gregg" last: "Irwin" phone: #208.461.9999 ] ]
+    OUTPUT: {First: Gregg   | Last:    Irwin| phone: *** Script Error: name has no value^/*** Where: get | }
+apply-test
+    INPUT:  {First: /first:<8| Last: /last:8| phone: /phoneX | /3}
+    VALUE:  #( first: "gregg" last: "irwin" phone: #208.461.0000 )
+    OUTPUT: {First: gregg   | Last:    irwin| phone:  | 208.461.0000}
+apply-test
+    INPUT:  {First: /name/first:<8| Last: /name/last:8| phone: /name/phoneX | /3}
+    VALUE:  #( name: #( first: "gregg" last: "irwin" phone: #208.461.0000 ) )
+    OUTPUT: "First: gregg   | Last:    irwin| phone:  | "
+....
+
+Here's one example of a `short-format` string converted to use the `composite` syntax.
+
+....
+    ; short-form
+    "Color :'general | idx3 /3:'money | num2 /N2:<'general | pi /system/words/pi:<'fixed | /(1 + 1) /now/time" [
+    ; composite
+    "Color :(general):| idx3 :(/3 money):| num2 :(/N2 :< general):| pi :(system/words/pi :< fixed):| :((1 + 1)): :(now/time):"
+....
+
+
+== block-form
+
+> Format and substitute values into a template block
+
+Everything about short-format applies here, except that the input is a block,
+and fields don't start with a `/` sigil. Instead, `paren!` values are used for
+fields, and the format inside them based on Red values, not string parsing.
+HOWEVER, an option would be to use tag! values and apply exactly the same 
+format as used in short-format. We could also support both, but that gives
+you two datatypes that are escaped as formatting fields in your block.
+
+The order is still `(key flags width prec style)`] and the types supported 
+are `([refinement! | path! | paren!] get-word! integer! integer! word!)`.
+The only special handling is that refinements are coerced to `integer!` or
+`word!` values and flags are coerced to a string.
+
+Spec:
+....
+    input [block!] "Template block containing `(/value:format)` fields and literal data"
+    data "Value(s) to apply to template fields"
+....
+
+Examples:
+....
+apply-test
+    INPUT:  [(:< 10)]
+    VALUE:  123.456
+    OUTPUT: "123.456   "
+apply-test
+    INPUT:  [(10)]
+    VALUE:  123.456
+    OUTPUT: "   123.456"
+apply-test
+    INPUT:  [(:Z 7 1)]
+    VALUE:  123.456
+    OUTPUT: "00123.5"
+apply-test
+    INPUT:  [(:Z 15 4)]
+    VALUE:  123.456789
+    OUTPUT: "0000000123.4568"
+apply-test
+    INPUT:  [(:Z 15 4)]
+    VALUE:  -123.456789
+    OUTPUT: "-000000123.4568"
+apply-test
+    INPUT:  [(5 1)]
+    VALUE:  123.456%
+    OUTPUT: "123.5%"
+apply-test
+    INPUT:  [(5 2)]
+    VALUE:  123.456%
+    OUTPUT: "123.46%"
+apply-test
+    INPUT:  [(10 3)]
+    VALUE:  123.456%
+    OUTPUT: "  123.456%"
+apply-test
+    INPUT:  [(10 4)]
+    VALUE:  -123.456%
+    OUTPUT: "- 123.456%"
+apply-test
+    INPUT:  [(10 4) " | " (8 2) " | " (5 0)]
+    VALUE:  -123.456%
+    OUTPUT: {- 123.456% " | " -123.46% " | " -123%}
+apply-test
+    INPUT:  [(:Z 8 2)]
+    VALUE:  -10.5
+    OUTPUT: "-00010.5"
+apply-test
+    INPUT:  [(:º)]
+    VALUE:  1
+    OUTPUT: "1st"
+apply-test
+    INPUT:  [(:º)]
+    VALUE:  15
+    OUTPUT: "15th"
+apply-test
+    INPUT:  [(:º)]
+    VALUE:  123
+    OUTPUT: "123rd"
+apply-test
+    INPUT:  [(/pi)]
+    VALUE:  123.456
+    OUTPUT: "3.141592653589793"
+apply-test
+    INPUT:  [(system/words/pi)]
+    VALUE:  123.456
+    OUTPUT: "3.141592653589793"
+apply-test
+    INPUT:  [((1 + 1))]
+    VALUE:  123.456
+    OUTPUT: "2"
+apply-test
+    INPUT:  [Color: (:< 10) number1 (:_ 3) number2 (:z 5) xxx]
+    VALUE:  ["Red" 2 3 -45.6]
+    OUTPUT: "Color: Red        number1   2 number2 00003 xxx"
+apply-test
+    INPUT:  [Color: (:< 10) number1 (/3) number2 (:z "xxx") xxx]    ; invalid spec
+    VALUE:  ["Red" 2 3 -45.6]
+    OUTPUT: none
+apply-test
+    INPUT:  [Color: (:< 10) number1 (/3) number2 (:z /5) xxx]       ; invalid spec
+    VALUE:  ["Red" 2 3 -45.6]
+    OUTPUT: none
+apply-test
+    INPUT:  [Color: (:< 10) number1 (/3) number2 (/5 :z)]
+    VALUE:  ["Red" 2 3 -45.6]
+    OUTPUT: "Color: Red        number1 -45.6 number2 "
+apply-test
+    INPUT:  [Color (:< 10) number1 (/3) number2 (/5 :z) float (:< 5 2) . newline]
+    VALUE:  ["Red" 2 3 -45.6]
+    OUTPUT: {Color Red        number1 -45.6 number2  float 2.0   . newline}
+apply-test
+    INPUT:  [Color (col-1) | idx3 (/3 acct) | num2 (/N2 :< general) | pi (system/words/pi :< fixed) | ((1 + 1)) (now/time)]
+    VALUE:  ["Red" n2 2 3 n4 -45.6]
+    OUTPUT: {Color <TBD: apply-format-style for non-number> | idx3 <Unknown style: acct> | num2 2 | pi 3.14 | 2 1:24:43}
+apply-test
+    INPUT:  [Color (:<5) | idx3 (/3 :Z3) | num2 (/N2 :<5) | pi (system/words/pi :< 5 2) | ((1 + 1)) (now/time)]
+    VALUE:  ["Red" n2 2 3 n4 -45.6]
+    OUTPUT: {Color Red | idx3 2 | num2 2 | pi 3.14  | 2 1:24:43}
+apply-test
+    INPUT:  [Color (:<5) | idx3 (/3 :Z3) | num2 (/N2 :<5) | pi (system/words/pi :<5 2) | ((1 + 1)) (:z3) | (now/time/precise 10) | (/fn)]
+    VALUE:  [ "Red" n2 2 3 n4 -45.6 fn func [][42] ]
+    OUTPUT: {Color Red | idx3 2 | num2 2 | pi 3.141592653589793 | 2 Red | 1:24:43.246 | 42}
+apply-test
+    INPUT:  [First: (/first :< 8) | Last: (/last 8) | phone: (/phoneX)]
+    VALUE:  [first: "Gregg" last: "Irwin" phone: #208.461.9999]
+    OUTPUT: "First: Gregg    | Last:    Irwin | phone: "
+apply-test
+    INPUT:  [First: (name/first :< 8) | Last: (name/last 8) | phone: (name/phoneX)]
+    VALUE:  [name: [first: "Gregg" last: "Irwin" phone: #208.461.9999]]
+    OUTPUT: "First: Gregg    | Last:    Irwin | phone: "
+apply-test
+    INPUT:  [First: (/first :< 8) | Last: (/last 8) | phone: (/phoneX)]
+    VALUE:  make object! [ first: "Gregg" last: "Irwin" phone: #208.461.9999 ]
+    OUTPUT: "First: Gregg    | Last:    Irwin | phone: "
+apply-test
+    INPUT:  [First: (name/first :< 8) | Last: (name/last 8) | phone: (name/phoneX)]
+    VALUE:  make object! [ name: make object! [ first: "Gregg" last: "Irwin" phone: #208.461.9999 ] ]
+    OUTPUT: {First: Gregg    | Last:    Irwin | phone: *** Script Error: path name/phoneX is not valid for word! type^/*** Where: get}
+apply-test
+    INPUT:  [First: (/first :< 8) | Last: (/last 8) | phone: (/phoneX)]
+    VALUE:  #( first: "gregg" last: "irwin" phone: #208.461.0000 )
+    OUTPUT: "First: gregg    | Last:    irwin | phone: "
+apply-test
+    INPUT:  [First: (name/first :< 8) | Last: (name/last 8) | phone: (name/phoneX)]
+    VALUE:  #( name: #( first: "gregg" last: "irwin" phone: #208.461.0000 ) )
+    OUTPUT: "First: gregg    | Last:    irwin | phone: "
+....
+
+
+== format (TBD)
+
+> General formatting entry point (TBD)
+
+Spec:
+....
+....
+
+Examples:
+....
+....
+
+
+
+
